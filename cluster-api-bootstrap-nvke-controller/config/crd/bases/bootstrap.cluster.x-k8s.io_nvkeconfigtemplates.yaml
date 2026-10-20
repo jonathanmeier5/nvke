@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    cluster.x-k8s.io/v1beta2: v1alpha1
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: nvkeconfigtemplates.bootstrap.cluster.x-k8s.io
+spec:
+  group: bootstrap.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: NvkeConfigTemplate
+    listKind: NvkeConfigTemplateList
+    plural: nvkeconfigtemplates
+    singular: nvkeconfigtemplate
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          NvkeConfigTemplate is the per-pool bootstrap configuration. A
+          MachineDeployment references it, and Cluster API clones one NvkeConfig per
+          Machine from it.
+
+          The attestation method lives here rather than on the infrastructure
+          template: it decides how the agent proves its identity, which is bootstrap
+          behaviour. It is also the Cluster API analogue of the node pool, which is
+          where the NVKE controller carries the same setting today.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NvkeConfigTemplateSpec wraps the template body.
+            properties:
+              template:
+                description: NvkeConfigTemplateResource is the template body a MachineDeployment
+                  clones.
+                properties:
+                  spec:
+                    description: |-
+                      NvkeConfigSpec is the bootstrap configuration for one Machine.
+
+                      The data secret this produces carries only what the host needs to boot,
+                      start nke-agent and attest. The kubeadm join configuration is not in it: the
+                      join is driven over gRPC once the agent answers, so the join material is
+                      never written to a secret at rest, and it is built after the control-plane
+                      endpoint is known rather than before.
+                    properties:
+                      attestationMethod:
+                        description: AttestationMethod selects the SPIRE node attestor.
+                          Defaults to tpm.
+                        enum:
+                        - tpm
+                        - joinToken
+                        - dsxImds
+                        type: string
+                      kubeletExtraArgs:
+                        additionalProperties:
+                          type: string
+                        description: KubeletExtraArgs are appended to the kubelet's
+                          flags at join time.
+                        type: object
+                      nodeLabels:
+                        additionalProperties:
+                          type: string
+                        description: NodeLabels are applied to the Kubernetes Node
+                          after it joins.
+                        type: object
+                      nodeTaints:
+                        description: NodeTaints are applied to the Kubernetes Node
+                          after it joins.
+                        items:
+                          description: |-
+                            corev1Taint mirrors corev1.Taint. It is declared here so the API package does
+                            not pull k8s.io/api into every consumer; replace with corev1.Taint if that
+                            dependency becomes unavoidable.
+                          properties:
+                            effect:
+                              type: string
+                            key:
+                              type: string
+                            value:
+                              type: string
+                          required:
+                          - effect
+                          - key
+                          type: object
+                        type: array
+                    type: object
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true
