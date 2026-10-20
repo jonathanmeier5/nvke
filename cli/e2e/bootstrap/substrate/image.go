@@ -71,6 +71,7 @@ func EnsureNodeImage(ctx context.Context, cfg Config, log Logf) (string, error) 
 			[]byte(cfg.SpireServerAddress),
 			[]byte(cfg.SpireServerPort),
 			[]byte(cfg.SpireTrustDomain),
+			[]byte(disableMTLSArg(cfg)),
 		}, []byte{0})
 		digest := sha256.Sum256(cacheInput)
 		tag = fmt.Sprintf("nvkectl-e2e/bootstrap-node:%s-ca%x",
@@ -124,12 +125,23 @@ func EnsureNodeImage(ctx context.Context, cfg Config, log Logf) (string, error) 
 	build := exec.CommandContext(ctx, ContainerCLI, "build",
 		"--build-arg", "BASE_IMAGE="+cfg.BaseImage,
 		"--build-arg", "NODE_AGENT_PORT="+cfg.AgentPort,
+		"--build-arg", "NODE_AGENT_DISABLE_MTLS="+disableMTLSArg(cfg),
 		"-t", tag, buildDir)
 	if out, err := build.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%s build %s: %w\n%s", ContainerCLI, tag, err, out)
 	}
 
 	return tag, nil
+}
+
+// disableMTLSArg renders Config.DisableMTLS as the NODE_AGENT_DISABLE_MTLS
+// build argument. node/Dockerfile tests the argument for emptiness, so the
+// off state has to be the empty string rather than "false".
+func disableMTLSArg(cfg Config) string {
+	if cfg.DisableMTLS {
+		return "1"
+	}
+	return ""
 }
 
 // stageAgentConfig renders the spire-agent config into the build context.

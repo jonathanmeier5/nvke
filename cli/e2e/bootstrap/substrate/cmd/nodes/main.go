@@ -4,7 +4,7 @@
 // Command nodes drives the nvkectl bootstrap-site E2E fixture: the fake
 // pre-provisioned nodes real dispatch will target once bootstrap site stops
 // being a stub. Invoked by `make -C cli nodes-up/nodes-down/nodes-status`,
-// not run directly.
+// node-image, not run directly.
 package main
 
 import (
@@ -26,7 +26,7 @@ const attestTimeout = 3 * time.Minute
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: nodes <up|down|status|inventory|attested>")
+		fmt.Fprintln(os.Stderr, "usage: nodes <up|down|status|image|inventory|attested>")
 		os.Exit(2)
 	}
 
@@ -42,13 +42,20 @@ func main() {
 		err = down(ctx, cfg, logf)
 	case "status":
 		err = status(ctx)
+	case "image":
+		// Build the node image without starting anything, so `nodes-up` reuses
+		// the tag this leaves behind rather than building one of its own.
+		var tag string
+		if tag, err = substrate.EnsureNodeImage(ctx, cfg, logf); err == nil {
+			fmt.Println(tag)
+		}
 	case "hosts":
 		err = writeHostsCSV(ctx)
 	case "attested":
 		err = attested(ctx, logf)
 	default:
 		fmt.Fprintf(os.Stderr,
-			"unknown subcommand %q; want up, down, status, hosts, or attested\n", os.Args[1])
+			"unknown subcommand %q; want up, down, status, image, hosts, or attested\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {

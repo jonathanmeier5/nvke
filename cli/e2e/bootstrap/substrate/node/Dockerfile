@@ -23,11 +23,29 @@ FROM ${BASE_IMAGE}
 
 ARG NODE_AGENT_PORT=15005
 
+# Non-empty builds a plaintext node: nvke-agent gets --disable-mtls, and the
+# assertion that the flag is absent is dropped. image.go drives this from
+# Config.DisableMTLS and folds it into the image cache key, so a plaintext image
+# gets its own tag and never silently reuses the mTLS one.
+ARG NODE_AGENT_DISABLE_MTLS=
+
 # Fail the build loudly if the base image ever stops serving on the port the
 # substrate (and the controller's NODE_AGENT_PORT default) expects, rather than letting it
 # surface as an unexplained readiness timeout.
-RUN grep -q -- "--secure-server-port ${NODE_AGENT_PORT}" /etc/default/nvke-agent
-RUN ! grep -q -- '--disable-mtls' /etc/default/nvke-agent
+#
+# The port assertion holds in both modes: a plaintext node still serves on
+# NODE_AGENT_PORT, and the substrate's readiness check greps for it. Only the
+# mTLS assertion is conditional, and the branch that drops it is the branch that
+# adds the flag, so nothing is left unguarded.
+RUN set -eu; \
+    if [ -n "${NODE_AGENT_DISABLE_MTLS}" ]; then \
+      grep -q -- '--disable-mtls' /etc/default/nvke-agent \
+        || sed -i '/^AGENT_ARGS=/ s/"$/ --disable-mtls"/' /etc/default/nvke-agent; \
+      grep -q -- "--secure-server-port ${NODE_AGENT_PORT}" /etc/default/nvke-agent; \
+    else \
+      grep -q -- "--secure-server-port ${NODE_AGENT_PORT}" /etc/default/nvke-agent; \
+      ! grep -q -- '--disable-mtls' /etc/default/nvke-agent; \
+    fi
 
 # These hosts are already provisioned. The CAPD base image has a cloud-init
 # status shim (controller/hack/capd-kindest-node/scripts/cloud-init-status-shim)

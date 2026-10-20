@@ -95,6 +95,12 @@ type Config struct {
 
 	// ReadyTimeout bounds how long to wait for each agent to answer.
 	ReadyTimeout time.Duration
+
+	// DisableMTLS builds the node image with nvke-agent configured for
+	// plaintext gRPC, from NVKECTL_E2E_DISABLE_MTLS=1. `nvkectl bootstrap site`
+	// has to be given --disable-mtls to match: this decides only what the agent
+	// speaks.
+	DisableMTLS bool
 }
 
 // DefaultConfig reads the substrate's knobs from the environment. Every value
@@ -117,6 +123,7 @@ func DefaultConfig() Config {
 		Keep:               os.Getenv("NVKECTL_E2E_KEEP") == "1",
 		Reuse:              os.Getenv("NVKECTL_E2E_REUSE") == "1",
 		ReadyTimeout:       envDuration("NVKECTL_E2E_READY_TIMEOUT", 3*time.Minute),
+		DisableMTLS:        os.Getenv("NVKECTL_E2E_DISABLE_MTLS") == "1",
 	}
 }
 
