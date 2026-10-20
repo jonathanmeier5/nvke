@@ -81,7 +81,7 @@ NVKECTL_LDFLAGS := \
 .PHONY: build build-cross test test-e2e-bootstrap fmt lint license file-license-check check-no-docker \
 	ensure-capd-image ensure-provisioned-provider-image images images-no-mtls node-image \
 	nodes-up nodes-down nodes-status nodes-disable-mtls nodes-hosts nodes-attested \
-	generate-sitespec bootstrap bootstrap-network bootstrap-network-down
+	generate-sitespec bootstrap bootstrap-network bootstrap-network-down bootstrap-network-when-ready bgp-up bgp-down bgp-status
 
 # The platforms shipped on a release. nvkectl is the one binary here a human
 # downloads, so it is cross-built; the others are deployed, not fetched.
@@ -423,6 +423,19 @@ nodes-attested:
 #   make generate-sitespec NERDCTL="sudo -E nerdctl" \
 #     NODES_HOSTS_CSV=/tmp/hosts.csv NODES_ATTESTATION_BASELINE=/tmp/baseline.json \
 #     NVKECTL_E2E_CA_DIR=/tmp/spire-ca SITESPEC_OUT=/tmp/sitespec.yaml
+#
+# The CA that SPIRE chains to, written by the substrate when the node images
+# are built. nvkectl takes it as three settings that have to agree:
+# `spire.upstreamCA: true` in the spec, plus NVKECTL_SPIRE_CA_CERT_FILE and
+# NVKECTL_SPIRE_CA_KEY_FILE naming readable files. Without the spec flag both
+# variables must be unset, so `generate-sitespec` and `bootstrap` set all
+# three together or none of them.
+#
+# The older form, `--set spire.caCertFile` and `--set spire.caKeyFile`, is
+# rejected:
+#
+#   --set spire.caCertFile: spire.caCertFile is no longer accepted:
+#   set NVKECTL_SPIRE_CA_CERT_FILE and spire.upstreamCA: true
 NVKECTL_E2E_CA_DIR ?= $(CURDIR)/.local/spire-ca
 export NVKECTL_E2E_CA_DIR
 NVKECTL_E2E_NETWORK ?= nvkectl-e2e-nodes
@@ -474,8 +487,8 @@ bootstrap-network: ## Let the bootstrap cluster reach the fixture nodes, and pub
 	@set -eu; \
 	nb="$(call bridge_of,$(NVKECTL_E2E_NETWORK))"; \
 	kb="$(call bridge_of,$(KIND_NETWORK))"; \
-	[ "$$nb" != "br-" ] || { echo "network $(NVKECTL_E2E_NETWORK) not found; run 'make nodes-up' first" >&2; exit 1; }; \
-	[ "$$kb" != "br-" ] || { echo "network $(KIND_NETWORK) not found; it appears once kind has run once" >&2; exit 1; }; \
+	[ -n "$$nb" ] && [ "$$nb" != "br-" ] || { echo "network $(NVKECTL_E2E_NETWORK) not found; run 'make nodes-up' first" >&2; exit 1; }; \
+	[ -n "$$kb" ] && [ "$$kb" != "br-" ] || { echo "network $(KIND_NETWORK) not found; it appears once the bootstrap kind cluster is up" >&2; exit 1; }; \
 	ip link show "$$nb" >/dev/null; ip link show "$$kb" >/dev/null; \
 	for pair in "$$kb $$nb" "$$nb $$kb" "$$nb $$nb"; do \
 	  set -- $$pair; \
@@ -501,22 +514,136 @@ bootstrap-network-down: ## Remove what bootstrap-network added.
 	fi; \
 	echo "bootstrap-network-down: removed"
 
-# Generate the site spec, wire the two bridges together, then bootstrap. The
-# three steps are one target because doing any of them without the others
-# fails in a way that points somewhere else: a spec with stale IPs, a
+# The control-plane VIP is reached over BGP, not ARP. kube-vip assigns the VIP
+# to loopback on whichever node holds it and advertises the /32; nothing on the
+# host learns that address on its own, so every connection to it leaves by the
+# default route and times out:
+#
+#   dial tcp 172.26.1.1:6443: i/o timeout
+#
+# which names no component at all. The controller then retries forever --
+# InstallKubeLocalDNS and the tenant-access reconciler both sit on it.
+#
+# FRR runs with --net host so zebra installs the learned /32 into the host
+# routing table, which is the table the kind bridge forwards from. kube-vip
+# auto-detects the node network's gateway as its peer, so neither static routes
+# nor manifest edits are needed. This mirrors start_bgp_speaker in
+# e2e/bootstrap/run.sh.
+#
+# A static `ip route add <vip>/32 via <node>` works too, and is the quick way
+# out of a stuck run, but it pins the VIP to one node: kube-vip moving it
+# leaves the route pointing at a machine that no longer answers. Remove any
+# such route before relying on this.
+BGP_CONTAINER ?= nvkectl-e2e-bgp
+FRR_IMAGE ?= quay.io/frrouting/frr:9.1.0
+BGP_FILES_DIR ?= $(CURDIR)/../controller/hack/bgp-containers
+BGP_RENDER_DIR ?= $(CURDIR)/e2e/bootstrap/.bgp
+
+bgp-up: ## Start the FRR speaker that learns the control-plane VIP from kube-vip.
+	@set -eu; \
+	if $(NERDCTL) exec $(BGP_CONTAINER) vtysh -c 'show version' >/dev/null 2>&1; then \
+	  echo "bgp-up: $(BGP_CONTAINER) already running"; exit 0; \
+	fi; \
+	router_id="$$($(NERDCTL) network inspect $(NVKECTL_E2E_NETWORK) \
+	  --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
+	  | awk '{for (i=1;i<=NF;i++) if ($$i ~ /^[0-9]+(\.[0-9]+){3}$$/) {print $$i; exit}}')"; \
+	listen_range="$$($(NERDCTL) network inspect $(NVKECTL_E2E_NETWORK) \
+	  --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null \
+	  | awk '{for (i=1;i<=NF;i++) if ($$i ~ /^[0-9]+(\.[0-9]+){3}\/[0-9]+$$/) {print $$i; exit}}')"; \
+	[ -n "$$router_id" ] || { echo "bgp-up: no gateway on $(NVKECTL_E2E_NETWORK); run 'make nodes-up' first" >&2; exit 1; }; \
+	[ -n "$$listen_range" ] || { echo "bgp-up: no subnet on $(NVKECTL_E2E_NETWORK); run 'make nodes-up' first" >&2; exit 1; }; \
+	rm -rf "$(BGP_RENDER_DIR)"; mkdir -p "$(BGP_RENDER_DIR)"; \
+	sed -e "s|@ROUTER_ID@|$$router_id|g" -e "s|@LISTEN_RANGE@|$$listen_range|g" \
+	  "$(BGP_FILES_DIR)/frr.conf.tmpl" > "$(BGP_RENDER_DIR)/frr.conf"; \
+	[ -s "$(BGP_RENDER_DIR)/frr.conf" ] || { echo "bgp-up: rendered frr.conf is empty" >&2; exit 1; }; \
+	cp "$(BGP_FILES_DIR)/vtysh.conf" "$(BGP_FILES_DIR)/daemons" "$(BGP_RENDER_DIR)/"; \
+	$(NERDCTL) rm -f $(BGP_CONTAINER) >/dev/null 2>&1 || true; \
+	$(NERDCTL) run -d --name $(BGP_CONTAINER) --net host \
+	  --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add NET_BIND_SERVICE \
+	  -v "$(BGP_RENDER_DIR)/frr.conf:/etc/frr/frr.conf" \
+	  -v "$(BGP_RENDER_DIR)/vtysh.conf:/etc/frr/vtysh.conf" \
+	  -v "$(BGP_RENDER_DIR)/daemons:/etc/frr/daemons" \
+	  $(FRR_IMAGE) >/dev/null; \
+	for i in $$(seq 30); do \
+	  if $(NERDCTL) exec $(BGP_CONTAINER) vtysh -c 'show version' >/dev/null 2>&1; then \
+	    echo "bgp-up: $(BGP_CONTAINER) ready (router-id $$router_id, listen-range $$listen_range)"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "bgp-up: FRR did not become ready within 30s" >&2; \
+	$(NERDCTL) logs $(BGP_CONTAINER) 2>&1 | sed 's/^/  /' || true; \
+	exit 1
+
+bgp-down: ## Stop the FRR speaker.
+	@$(NERDCTL) rm -f $(BGP_CONTAINER) >/dev/null 2>&1 || true; \
+	rm -rf "$(BGP_RENDER_DIR)"; \
+	echo "bgp-down: removed"
+
+bgp-status: ## Show the FRR peer summary and what it has learned for the VIP.
+	@$(NERDCTL) exec $(BGP_CONTAINER) vtysh -c 'show bgp summary' 2>&1 | head -20; \
+	echo; ip route show | grep -E "proto bgp|$(NVKECTL_E2E_SPIRE_SERVER_ADDRESS)" || echo "(no BGP-learned routes yet)"
+
+# Generate the site spec, bootstrap, and wire the two bridges together while
+# that runs. The steps are one target because doing any of them without the
+# others fails in a way that points somewhere else: a spec with stale IPs, a
 # controller that cannot reach the agents, or an mTLS mismatch.
+#
+# The wiring cannot come first. `$(KIND_NETWORK)` is created by the bootstrap
+# itself, when it brings up its kind cluster, so on a first run there is no
+# bridge to permit yet and `bootstrap-network` fails. It only appeared to work
+# while an earlier run had left the network behind.
+#
+# So a waiter runs beside the bootstrap and wires the bridges as soon as the
+# network exists. e2e/bootstrap/run.sh does the same thing, triggered by
+# "bootstrap kind cluster ready" in the bootstrap log; this watches for the
+# network instead, which needs no log parsing and cannot miss the line.
+#
+# There is plenty of margin: the network appears when kind starts, and the
+# rules are not needed until the controller runs NodePreflight against the
+# agents, much later.
 #
 # --disable-mtls follows NODES_MTLS, the same flag that decides what the agent
 # speaks. Set it at nodes-up too: it is baked into the node image, so changing
 # it here alone leaves the agents on the other setting.
 BOOTSTRAP_SITESPEC ?= $(SITESPEC_OUT)
 
-bootstrap: generate-sitespec bootstrap-network ## Generate the spec, wire the network, run `nvkectl bootstrap site`.
+BOOTSTRAP_NETWORK_TIMEOUT ?= 1200
+
+bootstrap: generate-sitespec bgp-up ## Generate the spec, start the BGP speaker, bootstrap, wire the network as kind appears.
 	@set -eu; \
 	flags=""; \
 	if [ "$(NODES_MTLS)" = "0" ]; then flags=" --disable-mtls"; fi; \
+	if [ -f "$(NVKECTL_E2E_CA_DIR)/ca.crt" ] && [ -f "$(NVKECTL_E2E_CA_DIR)/ca.key" ]; then \
+	  export NVKECTL_SPIRE_CA_CERT_FILE="$(NVKECTL_E2E_CA_DIR)/ca.crt"; \
+	  export NVKECTL_SPIRE_CA_KEY_FILE="$(NVKECTL_E2E_CA_DIR)/ca.key"; \
+	fi; \
+	$(MAKE) --no-print-directory bootstrap-network-when-ready & \
+	waiter=$$!; \
+	trap 'kill "$$waiter" 2>/dev/null || true' EXIT INT TERM; \
 	echo "bootstrap: nvkectl bootstrap site -f $(BOOTSTRAP_SITESPEC)$$flags"; \
 	$(BINARY) bootstrap site -f "$(BOOTSTRAP_SITESPEC)"$$flags
+
+# Waits for the kind *bridge*, not the kind network. nerdctl writes the CNI
+# conflist when the network is created, but the Linux bridge only appears when
+# the first container attaches to it. Watching the network therefore fires
+# while there is still nothing to install rules against:
+#
+#   Device "br-0b27c158feb3" does not exist.
+#
+# `ip link show` is the same check bootstrap-network makes, so waiting on it
+# means the wiring step cannot start before the device it needs.
+bootstrap-network-when-ready: ## Wait for the kind bridge, then run bootstrap-network.
+	@set -eu; \
+	deadline=$$(( $$(date +%s) + $(BOOTSTRAP_NETWORK_TIMEOUT) )); \
+	while [ "$$(date +%s)" -lt "$$deadline" ]; do \
+	  kb="$$($(NERDCTL) network inspect --format '{{.Id}}' $(KIND_NETWORK) 2>/dev/null | cut -c1-12 | sed 's/^/br-/')"; \
+	  if [ -n "$$kb" ] && [ "$$kb" != "br-" ] && ip link show "$$kb" >/dev/null 2>&1; then \
+	    exec $(MAKE) --no-print-directory bootstrap-network; \
+	  fi; \
+	  sleep 2; \
+	done; \
+	echo "bootstrap-network: $(KIND_NETWORK) bridge did not appear within $(BOOTSTRAP_NETWORK_TIMEOUT)s" >&2; \
+	exit 1
 
 generate-sitespec: build ## Write a site spec for the running fixture nodes to SITESPEC_OUT.
 	@set -eu; \
@@ -542,8 +669,9 @@ generate-sitespec: build ## Write a site spec for the running fixture nodes to S
 	extra=""; \
 	if [ -n "$$vip" ]; then extra="$$extra --set cluster.controlPlaneVIP=$$vip"; fi; \
 	if [ -f "$(NVKECTL_E2E_CA_DIR)/ca.crt" ] && [ -f "$(NVKECTL_E2E_CA_DIR)/ca.key" ]; then \
-	  extra="$$extra --set spire.caCertFile=$(NVKECTL_E2E_CA_DIR)/ca.crt"; \
-	  extra="$$extra --set spire.caKeyFile=$(NVKECTL_E2E_CA_DIR)/ca.key"; \
+	  extra="$$extra --set spire.upstreamCA=true"; \
+	  export NVKECTL_SPIRE_CA_CERT_FILE="$(NVKECTL_E2E_CA_DIR)/ca.crt"; \
+	  export NVKECTL_SPIRE_CA_KEY_FILE="$(NVKECTL_E2E_CA_DIR)/ca.key"; \
 	fi; \
 	$(BINARY) generate sitespec "$(SITESPEC_CLUSTER_NAME)" \
 	  --nodes "$(NODES_HOSTS_CSV)" \

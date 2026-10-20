@@ -22,3 +22,6 @@ e2e/bootstrap/.etcd-encryption-key.json
 # bootstrap fails, and CI uploads as an artifact. Regenerated on every
 # failing run.
 cluster-diagnostics/
+
+# Rendered FRR configuration from `make bgp-up`.
+e2e/bootstrap/.bgp/
