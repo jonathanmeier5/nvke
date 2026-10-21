@@ -78,7 +78,8 @@ NVKECTL_LDFLAGS := \
 	-X 'github.com/dsx-ai-factory/nvke/cli/internal/bootstrap/controllerdeploy.capiVersion=$(CAPI_VERSION)' \
 	$(RELEASE_LDFLAGS)
 
-.PHONY: build build-cross test test-e2e-bootstrap test-e2e-bootstrap-nico fmt lint license file-license-check check-no-docker \
+.PHONY: build build-cross test test-e2e-bootstrap test-e2e-bootstrap-nico \
+	test-e2e-bootstrap-go test-e2e-bootstrap-nico-go fmt lint license file-license-check check-no-docker \
 	ensure-capd-image ensure-provisioned-provider-image images \
 	nodes-up nodes-down nodes-status nodes-hosts nodes-attested
 
@@ -168,6 +169,28 @@ test-e2e-bootstrap: build
 # controller image already in containerd. See e2e/bootstrap/run-nico.sh.
 test-e2e-bootstrap-nico: build
 	./e2e/bootstrap/run-nico.sh
+
+# The same two lanes as Go tests. e2e/bootstrap/bootstraptest runs the real
+# command and states what the run produced, so the assertions are Go rather
+# than greps over a log file. They are behind the e2e_bootstrap build tag, so
+# `make test` compiles the package and runs its unit tests without trying to
+# build a cluster.
+#
+# The Go lanes stand up a one-node site with no control-plane VIP, which needs
+# no BGP speaker; the shell lanes still cover the three-node VIP shape. Both
+# read the same NVKECTL_E2E_* variables. Set NVKECTL_E2E_REQUIRE=1 to turn an
+# unmet prerequisite into a failure instead of a skip.
+GO_E2E_BOOTSTRAP_PKG := ./e2e/bootstrap/bootstraptest
+GO_E2E_BOOTSTRAP_FLAGS := -tags e2e_bootstrap -count=1 -v -timeout 60m
+
+test-e2e-bootstrap-go: build
+	$(GO) test $(GO_E2E_BOOTSTRAP_FLAGS) -run 'TestBootstrapSite_Provisioned' $(GO_E2E_BOOTSTRAP_PKG)
+
+# Takes a prepared host: the node network, nico-sim and the profiles image are
+# still stood up by run-nico.sh. The test names what is missing when they are
+# not there.
+test-e2e-bootstrap-nico-go: build
+	$(GO) test $(GO_E2E_BOOTSTRAP_FLAGS) -run 'TestBootstrapSite_Nico' $(GO_E2E_BOOTSTRAP_PKG)
 
 # Fake-node fixture for the bootstrap e2e suite: nerdctl containers running
 # nvke-agent, standing in for pre-provisioned hardware. cli/e2e/bootstrap/substrate
