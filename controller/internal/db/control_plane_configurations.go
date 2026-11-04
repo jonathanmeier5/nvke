@@ -42,6 +42,29 @@ type ControlPlaneConfigSpec struct {
 	MachineAnnotations          map[string]string                `json:"machine_annotations,omitempty" bun:"-"`
 	MachineLabels               map[string]string                `json:"machine_labels,omitempty" bun:"-"`
 	LaunchLayer                 *LaunchLayerControlPlaneProvider `json:"launch_layer,omitempty" bun:"-"`
+	// Adopted marks a control plane the management plane did not build. Nothing
+	// provisions or recycles its nodes; NVKE only reads it and adds worker pools.
+	Adopted bool `json:"adopted,omitempty" bun:"-"`
+	// KubeconfigSecretRef and EtcdSecretRef name the Secrets that already hold an
+	// adopted cluster's admin kubeconfig and etcd CA. Both are fixed at adoption:
+	// the update schema has no field for either, so no update can change them.
+	KubeconfigSecretRef *SecretRef `json:"kubeconfig_secret_ref,omitempty" bun:"-"`
+	EtcdSecretRef       *SecretRef `json:"etcd_secret_ref,omitempty" bun:"-"`
+}
+
+// SecretRef names a Kubernetes Secret the management plane can read. An empty
+// Namespace means the management-plane namespace.
+type SecretRef struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+func cloneSecretRef(ref *SecretRef) *SecretRef {
+	if ref == nil {
+		return nil
+	}
+	out := *ref
+	return &out
 }
 
 type NicoControlPlaneProvider struct {
@@ -193,6 +216,8 @@ func normalizeConfigSpec(cfg ControlPlaneConfigSpec) ControlPlaneConfigSpec {
 	out.Nico = cloneNicoControlPlaneProvider(cfg.Nico)
 	out.Capi = cloneCAPIControlPlaneProvider(cfg.Capi)
 	out.LaunchLayer = cloneLaunchLayerControlPlaneProvider(cfg.LaunchLayer)
+	out.KubeconfigSecretRef = cloneSecretRef(cfg.KubeconfigSecretRef)
+	out.EtcdSecretRef = cloneSecretRef(cfg.EtcdSecretRef)
 	return out
 }
 

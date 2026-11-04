@@ -72,7 +72,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cpPool.ControlPlane = true
 		req.NodePools = &[]api.NodePoolCreateConfig{cpPool}
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.ErrorIs(t, err, errControlPlaneNodePoolNotAllowed)
 	})
 
@@ -80,7 +80,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		svc := clusterService{}
 		req := validForgeCreateClusterRequest()
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "controlPlaneConfig is required")
 	})
@@ -92,7 +92,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cp.DesiredCount = 0
 		req.ControlPlaneConfig = cp
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "desiredCount must be at least 1")
 	})
@@ -105,7 +105,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cp.NodeLabels = map[string]string{"node-role.kubernetes.io/control-plane": ""}
 		req.ControlPlaneConfig = cp
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.EqualError(t, err, `controlPlaneConfig: nodeLabels: key "node-role.kubernetes.io/control-plane" is managed by core bootstrap components and cannot be set`)
 	})
 
@@ -116,10 +116,10 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cp.DesiredCount = 1
 		cp.NodeLabels = map[string]string{"node.kubernetes.io/custom": "true"}
 		req.ControlPlaneConfig = cp
-		require.NoError(t, svc.ValidateCreateClusterRequestFields(req))
+		require.NoError(t, svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate))
 
 		cp.NodeLabels = map[string]string{"node.kubernetes.io/instance-type": "h100"}
-		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req),
+		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate),
 			`controlPlaneConfig: nodeLabels: key "node.kubernetes.io/instance-type" is under reserved domain "kubernetes.io"; labels in this domain cannot be set`)
 	})
 
@@ -132,10 +132,10 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		pool := validForgeNodePoolCreateConfig("cp")
 		pool.NodeLabels = map[string]string{"node.kubernetes.io/custom": "true"}
 		req.NodePools = &[]api.NodePoolCreateConfig{pool}
-		require.NoError(t, svc.ValidateCreateClusterRequestFields(req))
+		require.NoError(t, svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate))
 
 		(*req.NodePools)[0].NodeLabels = map[string]string{"node.kubernetes.io/instance-type": "h100"}
-		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req),
+		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate),
 			`invalid node pool "cp": nodeLabels: key "node.kubernetes.io/instance-type" is under reserved domain "kubernetes.io"; labels in this domain cannot be set`)
 	})
 
@@ -146,7 +146,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cp.DesiredCount = 1
 		req.ControlPlaneConfig = cp
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.NoError(t, err)
 	})
 
@@ -155,7 +155,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		req := validForgeCreateClusterRequest()
 		req.ControlPlaneConfig = validForgeControlPlaneConfig()
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "controlPlaneVIP")
 	})
@@ -166,7 +166,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		req.ControlPlaneVIP = "172.31.0.10"
 		req.ControlPlaneConfig = validForgeControlPlaneConfig()
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.NoError(t, err)
 	})
 
@@ -179,7 +179,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 		cp.Nico.InstanceTypePreference = []uuid.UUID{uuid.New(), uuid.Nil}
 		req.ControlPlaneConfig = cp
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid nil instance type ID")
 	})
@@ -202,7 +202,7 @@ func TestValidateCreateClusterRequestFields_ControlPlaneConfig(t *testing.T) {
 			},
 		}
 
-		err := svc.ValidateCreateClusterRequestFields(req)
+		err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "controlPlaneConfig.nico is not supported, please provide controlPlaneConfig.infra")
 	})
@@ -287,7 +287,7 @@ func TestValidateCreateClusterRequestFields_LaunchLayer(t *testing.T) {
 
 			svc := svc
 			svc.nodeAgentProfile = tt.nodeAgentProfile
-			err := svc.ValidateCreateClusterRequestFields(req)
+			err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 			if tt.wantErr != "" {
 				require.EqualError(t, err, tt.wantErr)
 				return
@@ -876,7 +876,7 @@ func TestNicoControlPlaneConfigProfileIsOptional(t *testing.T) {
 				InstanceTypePreference: []uuid.UUID{uuid.New()},
 				Release:                "ubuntu",
 			},
-		})
+		}, ClusterIntentCreate)
 		require.NoError(t, err)
 	})
 
@@ -932,7 +932,7 @@ func TestValidateCreateClusterRequestFields_MachineMetadata(t *testing.T) {
 			req.ControlPlaneConfig.DesiredCount = 1
 			req.ControlPlaneConfig.MachineAnnotations = params.annotations
 			req.ControlPlaneConfig.MachineLabels = params.labels
-			err := svc.ValidateCreateClusterRequestFields(req)
+			err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 			if params.wantErr != "" {
 				require.ErrorContains(t, err, params.wantErr)
 			} else {
@@ -956,7 +956,7 @@ func TestControlPlaneVIPOverrideCreateAndScale(t *testing.T) {
 			svc := clusterService{allowControlPlaneWithoutVIP: allow}
 			req := validForgeCreateClusterRequest()
 			req.ControlPlaneConfig = validForgeControlPlaneConfig()
-			err := svc.ValidateCreateClusterRequestFields(req)
+			err := svc.ValidateCreateClusterRequestFields(req, ClusterIntentCreate)
 			if allow {
 				require.NoError(t, err)
 			} else {

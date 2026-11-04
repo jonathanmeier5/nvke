@@ -34,7 +34,11 @@ import (
 )
 
 const (
-	clusterIDConst  = "clusterID"
+	clusterIDConst = "clusterID"
+	// adoptedConst tells ProvisionCluster which path it is on. It travels in the
+	// outbox payload rather than being read from the row, so the workflow's
+	// behavior is fixed when it is queued and cannot change under a retry.
+	adoptedConst    = "adopted"
 	databaseConst   = "database"
 	failedValue     = "Failed"
 	healthz         = "/healthz"
@@ -187,44 +191,87 @@ func (s *clusterService) ListClusters(ctx context.Context, req api.ListClustersR
 	return api.ListClusters200JSONResponse{Clusters: apiClusters}, nil
 }
 
+// ClusterIntent distinguishes the two ways a cluster row comes into being.
+// Create builds a cluster; adopt records one that already runs.
+type ClusterIntent int
+
+const (
+	ClusterIntentCreate ClusterIntent = iota
+	ClusterIntentAdopt
+)
+
+func (i ClusterIntent) isAdopt() bool { return i == ClusterIntentAdopt }
+
 func (s *clusterService) CreateCluster(ctx context.Context, req api.CreateClusterRequestObject) (api.CreateClusterResponseObject, error) {
-	network, err := s.preflightCheckCreateClusterRequest(ctx, req.Body)
+	cluster, errResp, err := s.createOrAdoptCluster(ctx, req.Body, ClusterIntentCreate)
+	if err != nil || errResp != "" {
+		if errResp != "" {
+			return api.CreateCluster400JSONResponse{Message: errResp}, nil
+		}
+		return nil, err
+	}
+	return api.CreateCluster201JSONResponse(APIClusterFromDB(&cluster)), nil
+}
+
+// createOrAdoptCluster is the body of both create and adopt.
+//
+// The two differ in what they mean, not in what they carry: an adopted cluster
+// is already running, so the row is written in a state that says so and the
+// provisioning workflow is told to skip the steps that would build a control
+// plane. Everything else -- defaults, network resolution, the config snapshot,
+// the outbox entry, the initial node pools -- is identical, and sharing the body
+// is what keeps it that way.
+//
+// It returns a message when the request is bad, so each caller can wrap it in
+// its own response type.
+func (s *clusterService) createOrAdoptCluster(
+	ctx context.Context,
+	body *api.CreateClusterRequest,
+	intent ClusterIntent,
+) (db.Cluster, string, error) {
+	network, err := s.preflightCheckCreateClusterRequest(ctx, body, intent)
 	if err != nil {
 		var badRequestErr *badRequestError
 		if errors.As(err, &badRequestErr) {
 			recordRequestRejectionReason(ctx, badRequestErr.rejectionReason)
-			return api.CreateCluster400JSONResponse{Message: badRequestErr.Error()}, nil
+			return db.Cluster{}, badRequestErr.Error(), nil
 		}
-		return nil, err
+		return db.Cluster{}, "", err
 	}
-	if err := network.validateCNI(db.CniPlugin(req.Body.CniPlugin)); err != nil {
-		return api.CreateCluster400JSONResponse{Message: err.Error()}, nil
+	if err := network.validateCNI(db.CniPlugin(body.CniPlugin)); err != nil {
+		return db.Cluster{}, err.Error(), nil
 	}
 
 	var createdCluster db.Cluster
 	err = s.db.RunInTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		dbCluster, err := DBClusterFromAPI(req.Body)
+		dbCluster, err := DBClusterFromAPI(body)
 		if err != nil {
 			return fmt.Errorf("failed to convert cluster request: %w", err)
 		}
-		if err := s.applyClusterDefaults(req.Body, &dbCluster); err != nil {
+		if err := s.applyClusterDefaults(body, &dbCluster); err != nil {
 			return err
 		}
 		dbCluster.PodCIDR = network.podCIDR
 		dbCluster.ServiceCIDR = network.serviceCIDR.String()
 
+		// An adopted control plane already runs. The row says so from the start,
+		// so nothing downstream mistakes it for a cluster waiting to be built.
+		if intent.isAdopt() {
+			markClusterAdopted(&dbCluster)
+		}
+
 		// Persist the desired count and max surge as columns up front; the config
 		// snapshot row is created after the cluster row exists (it needs the cluster ID).
-		if req.Body.ControlPlaneConfig != nil {
-			dbCluster.ControlPlaneConfig.DesiredCount = req.Body.ControlPlaneConfig.DesiredCount
-			if req.Body.ControlPlaneConfig.MaxSurge != nil {
-				dbCluster.ControlPlaneConfig.MaxSurge = *req.Body.ControlPlaneConfig.MaxSurge
+		if body.ControlPlaneConfig != nil {
+			dbCluster.ControlPlaneConfig.DesiredCount = body.ControlPlaneConfig.DesiredCount
+			if body.ControlPlaneConfig.MaxSurge != nil {
+				dbCluster.ControlPlaneConfig.MaxSurge = *body.ControlPlaneConfig.MaxSurge
 			}
-			if req.Body.ControlPlaneConfig.AutoScaleDownDisabled != nil {
-				dbCluster.ControlPlaneConfig.AutoScaleDownDisabled = *req.Body.ControlPlaneConfig.AutoScaleDownDisabled
+			if body.ControlPlaneConfig.AutoScaleDownDisabled != nil {
+				dbCluster.ControlPlaneConfig.AutoScaleDownDisabled = *body.ControlPlaneConfig.AutoScaleDownDisabled
 			}
-			if req.Body.ControlPlaneConfig.NodeRebalanceDisabled != nil {
-				dbCluster.ControlPlaneConfig.NodeRebalanceDisabled = *req.Body.ControlPlaneConfig.NodeRebalanceDisabled
+			if body.ControlPlaneConfig.NodeRebalanceDisabled != nil {
+				dbCluster.ControlPlaneConfig.NodeRebalanceDisabled = *body.ControlPlaneConfig.NodeRebalanceDisabled
 			}
 		}
 
@@ -233,15 +280,20 @@ func (s *clusterService) CreateCluster(ctx context.Context, req api.CreateCluste
 			return fmt.Errorf("failed to create cluster: %w", err)
 		}
 
-		if req.Body.ControlPlaneConfig != nil {
+		if body.ControlPlaneConfig != nil {
 			spec := controlPlaneConfigSpecFromCreateAPI(
-				req.Body.ControlPlaneConfig,
+				body.ControlPlaneConfig,
 				createdCluster.KubernetesVersion,
 				s.teleportCfg.NodePoolTeleportDefault(true),
 				createdCluster.ProviderType,
 			)
+			changeReason := "cluster create controlPlaneConfig"
+			if intent.isAdopt() {
+				applyAdoptionToSpec(&spec, body.ControlPlaneConfig)
+				changeReason = "cluster adopt controlPlaneConfig"
+			}
 			if err := db.CreateControlPlaneConfigRowIfChanged(ctx, tx, &createdCluster, spec, db.CreateControlPlaneConfigRowOpts{
-				ChangeReason: "cluster create controlPlaneConfig",
+				ChangeReason: changeReason,
 			}); err != nil {
 				return fmt.Errorf("failed to create initial control plane configuration: %w", err)
 			}
@@ -258,14 +310,15 @@ func (s *clusterService) CreateCluster(ctx context.Context, req api.CreateCluste
 			ClusterName:  createdCluster.Name,
 		}, map[string]interface{}{
 			clusterIDConst: createdCluster.ID,
+			adoptedConst:   intent.isAdopt(),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create workflow outbox entry for cluster: %w", err)
 		}
 
 		var initialNodePools []api.NodePoolCreateConfig
-		if req.Body.NodePools != nil {
-			initialNodePools = *req.Body.NodePools
+		if body.NodePools != nil {
+			initialNodePools = *body.NodePools
 		}
 		if err := s.createInitialNodePools(ctx, tx, createdCluster, initialNodePools); err != nil {
 			return fmt.Errorf("failed to create initial node pools and nodes: %w", err)
@@ -276,26 +329,31 @@ func (s *clusterService) CreateCluster(ctx context.Context, req api.CreateCluste
 	if err != nil {
 		if errors.Is(err, db.ErrClusterNameNotUnique) {
 			recordRequestRejectionReason(ctx, rejectionReasonClusterNameAlreadyExists)
-			return api.CreateCluster400JSONResponse{
-				Message: fmt.Sprintf("A cluster already exists with the name %q", req.Body.Name),
-			}, nil
+			return db.Cluster{}, fmt.Sprintf("A cluster already exists with the name %q", body.Name), nil
 		}
 		var badRequestErr *badRequestError
 		if errors.As(err, &badRequestErr) {
 			recordRequestRejectionReason(ctx, badRequestErr.rejectionReason)
-			return api.CreateCluster400JSONResponse{Message: badRequestErr.Error()}, nil
+			return db.Cluster{}, badRequestErr.Error(), nil
 		}
-		return nil, err
+		return db.Cluster{}, "", err
 	}
 
-	return api.CreateCluster201JSONResponse(APIClusterFromDB(&createdCluster)), nil
+	return createdCluster, "", nil
 }
 
 func (s *clusterService) preflightCheckCreateClusterRequest(
 	ctx context.Context,
 	req *api.CreateClusterRequest,
+	intent ClusterIntent,
 ) (resolvedClusterNetwork, error) {
-	if err := s.ValidateCreateClusterRequestFields(req); err != nil {
+	// Adoption rules run first. Judged by the create rules, an adopt request
+	// fails on whichever create-only rule trips first, which says nothing useful
+	// about what is actually wrong with it.
+	if err := validateAdoptionFields(req, intent); err != nil {
+		return resolvedClusterNetwork{}, newBadRequestErrorf("%s", err)
+	}
+	if err := s.ValidateCreateClusterRequestFields(req, intent); err != nil {
 		return resolvedClusterNetwork{}, newBadRequestErrorf("%s", err)
 	}
 	network, err := resolveClusterNetwork(req.Network)
@@ -376,7 +434,7 @@ func validateControlPlaneNodeAgentProfile(profile db.Node, cluster db.Cluster, s
 	return validateNodeAgentProfile(profile, cluster, nodePool)
 }
 
-func (s *clusterService) ValidateCreateClusterRequestFields(req *api.CreateClusterRequest) error {
+func (s *clusterService) ValidateCreateClusterRequestFields(req *api.CreateClusterRequest, intent ClusterIntent) error {
 	if err := naming.ValidateClusterNameForNodeNaming(req.Name); err != nil {
 		return err
 	}
@@ -431,7 +489,7 @@ func (s *clusterService) ValidateCreateClusterRequestFields(req *api.CreateClust
 		}
 		req.ControlPlaneConfig.NodeAgentConfig.Version = &version
 	}
-	if err := validateCreateClusterLevelControlPlane(req, nodePools, providerType, s.allowlistedLabelKeys); err != nil {
+	if err := validateCreateClusterLevelControlPlane(req, nodePools, providerType, s.allowlistedLabelKeys, intent); err != nil {
 		return err
 	}
 	controlPlaneSpec := controlPlaneConfigSpecFromCreateAPI(req.ControlPlaneConfig, req.ControlPlaneKubernetesVersion, false, providerType)

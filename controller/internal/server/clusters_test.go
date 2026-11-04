@@ -2116,7 +2116,7 @@ func TestValidateCreateClusterRequestFields_LegacyCalicoCreationGate(t *testing.
 			req := baseNicoClusterCreateRequest()
 			req.CniPlugin = tt.cni
 
-			err := svc.ValidateCreateClusterRequestFields(req)
+			err := svc.ValidateCreateClusterRequestFields(req, server.ClusterIntentCreate)
 
 			if tt.wantErr == "" {
 				require.NoError(t, err)
@@ -2146,7 +2146,7 @@ func TestValidateCreateClusterRequestFields_RequiresExactlyOneProvider(t *testin
 	t.Run("neither provider", func(t *testing.T) {
 		req := baseNicoClusterCreateRequest()
 		req.Nico = nil
-		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req), "exactly one provider must be set")
+		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req, server.ClusterIntentCreate), "exactly one provider must be set")
 	})
 
 	t.Run("both providers", func(t *testing.T) {
@@ -2157,7 +2157,7 @@ func TestValidateCreateClusterRequestFields_RequiresExactlyOneProvider(t *testin
 				"kind":       "DockerCluster",
 			},
 		}
-		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req), "exactly one provider must be set")
+		require.EqualError(t, svc.ValidateCreateClusterRequestFields(req, server.ClusterIntentCreate), "exactly one provider must be set")
 	})
 }
 
@@ -2191,7 +2191,7 @@ func TestValidateCreateClusterRequestFields_NicoIdentityFieldsRequired(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			req := baseNicoClusterCreateRequest()
 			tc.mutate(req.Nico)
-			require.EqualError(t, svc.ValidateCreateClusterRequestFields(req), tc.wantErr)
+			require.EqualError(t, svc.ValidateCreateClusterRequestFields(req, server.ClusterIntentCreate), tc.wantErr)
 		})
 	}
 }

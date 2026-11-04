@@ -249,7 +249,7 @@ func TestCreateCluster_RejectsDeprecatedRelease(t *testing.T) {
 			req.NodePools = &[]api.NodePoolCreateConfig{worker}
 
 			if tt.want400 == "" {
-				_, err := service.preflightCheckCreateClusterRequest(t.Context(), req)
+				_, err := service.preflightCheckCreateClusterRequest(t.Context(), req, ClusterIntentCreate)
 				require.NoError(t, err)
 				return
 			}

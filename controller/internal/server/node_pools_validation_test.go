@@ -384,6 +384,7 @@ func TestValidateCreateClusterRequest_NodeNamePrefixLength(t *testing.T) {
 	t.Run("rejects cluster name too long for generated node names", func(t *testing.T) {
 		err := svc.ValidateCreateClusterRequestFields(
 			forgeClusterRequest(strings.Repeat("a", naming.MaxGeneratedNodeNameLength), "cp"),
+			ClusterIntentCreate,
 		)
 
 		require.Error(t, err)
@@ -396,6 +397,7 @@ func TestValidateCreateClusterRequest_NodeNamePrefixLength(t *testing.T) {
 	t.Run("rejects embedded node pool with prefix too long for cluster name", func(t *testing.T) {
 		err := svc.ValidateCreateClusterRequestFields(
 			forgeClusterRequest(clusterName, "runtime-dgxc-k8s-forge-site-2-dev1-cp"),
+			ClusterIntentCreate,
 		)
 
 		require.Error(t, err)

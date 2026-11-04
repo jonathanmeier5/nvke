@@ -358,8 +358,18 @@ type ControlPlaneConfig struct {
 	// DesiredCount The desired number of cluster-level control plane nodes. Creating a cluster with or increasing this count above 1 requires controlPlaneVIP on the cluster unless the development-only allowControlPlaneWithoutVIP setting is enabled.
 	DesiredCount int `json:"desiredCount,omitempty"`
 
+	// EtcdSecretRef Secret holding the etcd CA of an adopted cluster. Required by
+	// `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+	// absent from the update schema, so a later update cannot change it.
+	EtcdSecretRef *SecretReference `json:"etcdSecretRef,omitempty"`
+
 	// Infra Infra provider control plane fields.
 	Infra *InfraControlPlaneProvider `json:"infra,omitempty"`
+
+	// KubeconfigSecretRef Secret holding the admin kubeconfig of an adopted cluster. Required by
+	// `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+	// absent from the update schema, so a later update cannot change it.
+	KubeconfigSecretRef *SecretReference `json:"kubeconfigSecretRef,omitempty"`
 
 	// LaunchLayer LaunchLayer settings for control-plane nodes.
 	LaunchLayer *LaunchLayerControlPlaneProvider `json:"launchLayer,omitempty"`
@@ -527,8 +537,18 @@ type CreateClusterControlPlaneConfig struct {
 	// DesiredCount The desired number of cluster-level control plane nodes. Must be at least 1. Values above 1 require controlPlaneVIP on the cluster unless the development-only allowControlPlaneWithoutVIP setting is enabled.
 	DesiredCount int `json:"desiredCount"`
 
+	// EtcdSecretRef Secret holding the etcd CA of an adopted cluster. Required by
+	// `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+	// absent from the update schema, so a later update cannot change it.
+	EtcdSecretRef *SecretReference `json:"etcdSecretRef,omitempty"`
+
 	// Infra Infra provider fields for cluster-level control plane configuration. Mutually exclusive with `nico`.
 	Infra *InfraControlPlaneProvider `json:"infra,omitempty"`
+
+	// KubeconfigSecretRef Secret holding the admin kubeconfig of an adopted cluster. Required by
+	// `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+	// absent from the update schema, so a later update cannot change it.
+	KubeconfigSecretRef *SecretReference `json:"kubeconfigSecretRef,omitempty"`
 
 	// LaunchLayer LaunchLayer settings for the control-plane nodes. Same shape as
 	// LaunchLayerNodePoolProvider — control-plane nodes are still
@@ -1594,6 +1614,15 @@ type Release struct {
 	Name string `json:"name"`
 }
 
+// SecretReference A reference to a Kubernetes Secret that the management plane can read.
+type SecretReference struct {
+	// Name Secret name.
+	Name string `json:"name"`
+
+	// Namespace Secret namespace. Defaults to the management-plane namespace when omitted.
+	Namespace string `json:"namespace,omitempty"`
+}
+
 // SpireServer A SPIRE server address the cluster's SPIRE agents dial.
 type SpireServer struct {
 	// Address Host name or IP address of the SPIRE server.
@@ -1825,6 +1854,9 @@ type ListNodesParams struct {
 
 // CreateClusterJSONRequestBody defines body for CreateCluster for application/json ContentType.
 type CreateClusterJSONRequestBody = CreateClusterRequest
+
+// AdoptClusterJSONRequestBody defines body for AdoptCluster for application/json ContentType.
+type AdoptClusterJSONRequestBody = CreateClusterRequest
 
 // UpdateClusterJSONRequestBody defines body for UpdateCluster for application/json ContentType.
 type UpdateClusterJSONRequestBody = UpdateClusterRequest

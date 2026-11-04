@@ -101,7 +101,7 @@ func TestLaunchLayerSecurityGroups_Admission(t *testing.T) {
 			}
 			database := new(testutil.MockDB)
 			svc := clusterService{db: database, providers: newProviderSupport([]string{config.InfraProviderLaunchLayer})}
-			err := svc.ValidateCreateClusterRequestFields(clusterReq)
+			err := svc.ValidateCreateClusterRequestFields(clusterReq, ClusterIntentCreate)
 			cluster := launchLayerCluster()
 			cluster.LaunchLayer.SecurityGroups = []db.LaunchLayerSecurityGroup{{Name: "bm", Type: "BARE_METAL"}}
 			poolSvc := NewNodePoolService(slog.Default(), database, config.TeleportConfig{}, []string{config.InfraProviderLaunchLayer})

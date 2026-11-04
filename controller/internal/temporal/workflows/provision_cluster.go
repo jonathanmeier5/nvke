@@ -28,6 +28,10 @@ const (
 
 type ProvisionClusterInput struct {
 	ClusterID uuid.UUID
+	// Adopted marks a cluster whose control plane already runs. The CAPI
+	// scaffold, the add-ons and the final condition still apply to it; the steps
+	// that build a control plane do not.
+	Adopted bool
 }
 
 func ProvisionCluster(ctx workflow.Context, input ProvisionClusterInput) error {
@@ -50,38 +54,56 @@ func provisionCluster(ctx workflow.Context, input ProvisionClusterInput) error {
 		return errors.New("clusterID is required")
 	}
 
+	// The CAPI scaffold is what every Machine later hangs off: without the infra
+	// Cluster and the CAPI Cluster there is no parent for CAPI to reconcile
+	// against. An adopted cluster needs it as much as a new one.
 	if err := provisionCAPIClusterResources(ctx, input.ClusterID); err != nil {
 		return fmt.Errorf("failed to create CAPI resources: %w", err)
 	}
 
-	// Wait for one of the control plane nodes to be ready to join, choose it as the initial node
-	initialNodeID, err := waitForControlPlaneNodeReadyToJoin(ctx, input.ClusterID)
-	if err != nil {
-		return fmt.Errorf("failed to wait for a control plane node to be ready to join: %w", err)
-	}
+	// The four steps below are the ones that BUILD a control plane: they wait
+	// for a control-plane node this management plane is provisioning, put
+	// kube-vip on it, and run kubeadm init against it. An adopted cluster is
+	// already serving, has no such node, and must never be init'd again, so
+	// adoption stops short of them. Everything after is configuration of a
+	// cluster that exists, which applies either way.
+	if !input.Adopted {
+		// Wait for one of the control plane nodes to be ready to join, choose it as the initial node
+		initialNodeID, err := waitForControlPlaneNodeReadyToJoin(ctx, input.ClusterID)
+		if err != nil {
+			return fmt.Errorf("failed to wait for a control plane node to be ready to join: %w", err)
+		}
 
-	if err := configureInitialNodeKubeVip(ctx, input.ClusterID, initialNodeID); err != nil {
-		return fmt.Errorf("failed to configure initial node KubeVip: %w", err)
-	}
+		if err := configureInitialNodeKubeVip(ctx, input.ClusterID, initialNodeID); err != nil {
+			return fmt.Errorf("failed to configure initial node KubeVip: %w", err)
+		}
 
-	// Create the cluster with a single node -- remaining CP nodes join via JoinNode (started by the control-plane controller)
-	if err := kubeadmInitWithCNI(ctx, input.ClusterID, initialNodeID); err != nil {
-		return err
-	}
+		// Create the cluster with a single node -- remaining CP nodes join via JoinNode (started by the control-plane controller)
+		if err := kubeadmInitWithCNI(ctx, input.ClusterID, initialNodeID); err != nil {
+			return err
+		}
 
-	if err := markInitialNodeAsJoined(ctx, initialNodeID); err != nil {
-		return fmt.Errorf("failed to mark initial control plane node as joined: %w", err)
+		if err := markInitialNodeAsJoined(ctx, initialNodeID); err != nil {
+			return fmt.Errorf("failed to mark initial control plane node as joined: %w", err)
+		}
 	}
 
 	// This could be expanded into an add-on system later, but for now this is the only thing we install after cluster creation
-	if err := installKubeLocalDNS(ctx, input.ClusterID); err != nil {
-		return fmt.Errorf("failed to install kube-local-dns: %w", err)
-	}
+	// An adopted cluster belongs to its operator. These two write to it -- they
+	// are not destructive the way kubeadm init is, but they are still changes to
+	// a cluster this management plane did not build, so adoption leaves them
+	// alone. Flip this guard to run them if an adopted cluster should end up
+	// configured exactly like a provisioned one.
+	if !input.Adopted {
+		if err := installKubeLocalDNS(ctx, input.ClusterID); err != nil {
+			return fmt.Errorf("failed to install kube-local-dns: %w", err)
+		}
 
-	// Clusters provisioned before this step existed must replay without it.
-	if workflow.GetVersion(ctx, psaLabelSystemNamespacesChangeID, workflow.DefaultVersion, 1) >= 1 {
-		if err := labelSystemNamespacesForPSA(ctx, input.ClusterID, "Labeling system namespaces for Pod Security Admission"); err != nil {
-			return err
+		// Clusters provisioned before this step existed must replay without it.
+		if workflow.GetVersion(ctx, psaLabelSystemNamespacesChangeID, workflow.DefaultVersion, 1) >= 1 {
+			if err := labelSystemNamespacesForPSA(ctx, input.ClusterID, "Labeling system namespaces for Pod Security Admission"); err != nil {
+				return err
+			}
 		}
 	}
 

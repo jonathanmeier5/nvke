@@ -145,6 +145,7 @@ func validateCreateClusterLevelControlPlane(
 	nodePools []api.NodePoolCreateConfig,
 	providerType db.ProviderType,
 	allowlistedLabelKeys []string,
+	intent ClusterIntent,
 ) error {
 	for _, np := range nodePools {
 		if np.ControlPlane {
@@ -168,9 +169,9 @@ func validateCreateClusterLevelControlPlane(
 
 	switch providerType {
 	case db.ProviderTypeCAPI:
-		return validateCreateCAPIControlPlaneConfig(providerType, ccpc)
+		return validateCreateCAPIControlPlaneConfig(providerType, ccpc, intent)
 	case db.ProviderTypeNico:
-		return validateCreateForgeControlPlaneConfigFields(ccpc)
+		return validateCreateForgeControlPlaneConfigFields(ccpc, intent)
 	case db.ProviderTypeLaunchLayer:
 		return validateCreateLaunchLayerControlPlaneConfig(providerType, ccpc, req.LaunchLayer)
 	default:
@@ -180,12 +181,26 @@ func validateCreateClusterLevelControlPlane(
 
 // validateCreateCAPIControlPlaneConfig enforces CAPI control-plane config rules:
 // infra.machineTemplate is required and Forge-only fields are rejected.
-func validateCreateCAPIControlPlaneConfig(providerType db.ProviderType, c *api.CreateClusterControlPlaneConfig) error {
+//
+// Adoption is the exception. A machine template describes how to build a
+// control-plane node, and an adopted control plane is already running: nothing
+// here will ever create one from it. Requiring the caller to invent a template
+// that is never used would also persist it on the config snapshot, where a
+// later rollout could pick it up. So it is optional when adopting, and the
+// payload validation below is skipped when it is absent.
+func validateCreateCAPIControlPlaneConfig(providerType db.ProviderType, c *api.CreateClusterControlPlaneConfig, intent ClusterIntent) error {
 	if c.Nico != nil {
 		return fmt.Errorf("controlPlaneConfig.nico is not supported, please provide controlPlaneConfig.infra")
 	}
-	if c.Infra == nil || isEmptyManifestObject(c.Infra.MachineTemplate) {
-		return fmt.Errorf("controlPlaneConfig.infra.machineTemplate is required")
+	machineTemplateMissing := c.Infra == nil || isEmptyManifestObject(c.Infra.MachineTemplate)
+	if machineTemplateMissing {
+		if !intent.isAdopt() {
+			return fmt.Errorf("controlPlaneConfig.infra.machineTemplate is required")
+		}
+		if c.Infra == nil {
+			return nil
+		}
+		return validateCloudInitFiles(c.Infra.BootstrapFiles)
 	}
 	infraMachineTemplate, err := rawManifestFromObject(c.Infra.MachineTemplate)
 	if err != nil {
@@ -238,9 +253,18 @@ func validateCreateLaunchLayerControlPlaneConfig(
 // validateCreateForgeControlPlaneConfigFields enforces the non-networking Forge
 // control-plane config rules: CAPI-only fields are rejected and the required
 // Forge fields are present.
-func validateCreateForgeControlPlaneConfigFields(c *api.CreateClusterControlPlaneConfig) error {
+func validateCreateForgeControlPlaneConfigFields(c *api.CreateClusterControlPlaneConfig, intent ClusterIntent) error {
 	if c.Infra != nil {
 		return fmt.Errorf("controlPlaneConfig.infra is not supported, please provide controlPlaneConfig.nico")
+	}
+	// Provider exclusivity above still holds when adopting, but nothing below
+	// does: instanceTypePreference, osProfile and the subnet/VPC-prefix choice
+	// all describe how to build a control-plane node, and an adopted control
+	// plane is already running. Requiring them would make the caller invent
+	// values that are then persisted on the config snapshot, where a later
+	// rollout could build a node from them.
+	if intent.isAdopt() {
+		return nil
 	}
 	if c.Nico == nil {
 		return fmt.Errorf("controlPlaneConfig.nico is required for a nico cluster control plane")

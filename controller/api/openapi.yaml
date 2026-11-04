@@ -290,6 +290,66 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /clusters/adopt:
+    post:
+      tags: [Clusters]
+      summary: Adopt an existing cluster
+      operationId: adoptCluster
+      x-fern-ignore: true
+      description: |
+        Registers a cluster that already runs, instead of provisioning a new one.
+        NVKE does not run `kubeadm init` for it and does not create its
+        control-plane nodes. Use this to put an existing cluster under management
+        so that node pools can be added to it.
+
+        The body is the same as `createCluster`.
+        `controlPlaneConfig.kubeconfigSecretRef` and
+        `controlPlaneConfig.etcdSecretRef` are required here and rejected by
+        `createCluster`. They name Secrets that already hold the cluster's admin
+        kubeconfig and its etcd CA. Both are fixed at adoption.
+
+        `controlPlaneVIP` is required: the adopted cluster is reached through it,
+        and the control-plane node IPs and hostnames are discovered from it.
+      requestBody:
+        required: true
+        description: The existing cluster to adopt.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateClusterRequest"
+            example:
+              name: csc-site-a
+              controlPlaneKubernetesVersion: 1.33.4
+              cniPlugin: calico
+              etcdEncrypted: true
+              controlPlaneVIP: 10.0.0.10
+              infra:
+                cluster: {}
+              controlPlaneConfig:
+                desiredCount: 3
+                kubeconfigSecretRef:
+                  name: csc-site-a-kubeconfig
+                etcdSecretRef:
+                  name: csc-site-a-etcd
+                infra: {}
+      responses:
+        "201":
+          description: Cluster adopted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "400":
+          description: The request failed validation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /clusters/{clusterID}:
     parameters:
       - name: clusterID
@@ -1270,6 +1330,24 @@ components:
           x-fern-ignore: true
           type: boolean
           description: Whether Teleport SSH enrollment is enabled for control plane nodes.
+        kubeconfigSecretRef:
+          x-fern-ignore: true
+          readOnly: true
+          allOf:
+            - $ref: "#/components/schemas/SecretReference"
+          description: |
+            Secret holding the admin kubeconfig of an adopted cluster. Required by
+            `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+            absent from the update schema, so a later update cannot change it.
+        etcdSecretRef:
+          x-fern-ignore: true
+          readOnly: true
+          allOf:
+            - $ref: "#/components/schemas/SecretReference"
+          description: |
+            Secret holding the etcd CA of an adopted cluster. Required by
+            `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+            absent from the update schema, so a later update cannot change it.
         nico:
           allOf:
             - $ref: "#/components/schemas/NicoControlPlaneProvider"
@@ -1285,6 +1363,30 @@ components:
           description: Infra provider control plane fields.
         nodeAgentConfig:
           $ref: "#/components/schemas/NodeAgentConfig"
+
+    SecretReference:
+      x-fern-ignore: true
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      description: A reference to a Kubernetes Secret that the management plane can read.
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+          minLength: 1
+          maxLength: 253
+          description: Secret name.
+          x-go-type-skip-optional-pointer: true
+        namespace:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+          description: Secret namespace. Defaults to the management-plane namespace when omitted.
+          x-go-type-skip-optional-pointer: true
+
     ClusterControlPlane:
       type: object
       additionalProperties: false
@@ -1443,6 +1545,22 @@ components:
           x-fern-ignore: true
           type: boolean
           description: Whether Teleport SSH enrollment is enabled for control plane nodes. When omitted, the server-side default for the site is applied.
+        kubeconfigSecretRef:
+          x-fern-ignore: true
+          allOf:
+            - $ref: "#/components/schemas/SecretReference"
+          description: |
+            Secret holding the admin kubeconfig of an adopted cluster. Required by
+            `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+            absent from the update schema, so a later update cannot change it.
+        etcdSecretRef:
+          x-fern-ignore: true
+          allOf:
+            - $ref: "#/components/schemas/SecretReference"
+          description: |
+            Secret holding the etcd CA of an adopted cluster. Required by
+            `adoptCluster`, rejected by `createCluster`. Fixed at adoption: it is
+            absent from the update schema, so a later update cannot change it.
         nico:
           $ref: "#/components/schemas/NicoControlPlaneProviderCreate"
         launchLayer:
